@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jp-invoice-check"
+version = "0.1.0"
+description = "Check Japanese qualified invoices: six required items, per-rate totals, tax rounded once per rate."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "NEXUS tools" }]
+keywords = ["mcp", "mcp-server", "japanese", "ai-agents"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Natural Language :: Japanese",
+  "Topic :: Text Processing :: Linguistic",
+]
+dependencies = []
+
+[project.scripts]
+jp-invoice-check = "jpinvoice.server:main"
+
+[project.urls]
+Homepage = "https://github.com/ayatrader/jp-invoice-check"
+Source = "https://github.com/ayatrader/jp-invoice-check"
+
+[tool.setuptools]
+packages = ["jpinvoice"]
