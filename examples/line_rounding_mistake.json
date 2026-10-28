@@ -1,0 +1,50 @@
+{
+  "issuer": {
+    "name": "株式会社サンプル商事",
+    "registration_number": "T1123456789012"
+  },
+  "date": "2026-10-28",
+  "buyer": {},
+  "price_basis": "exclusive",
+  "rounding": "floor",
+  "items": [
+    {
+      "description": "コピー用紙",
+      "amount": 1999,
+      "rate": 10
+    },
+    {
+      "description": "トナー",
+      "amount": 2999,
+      "rate": 10
+    },
+    {
+      "description": "ボールペン",
+      "amount": 999,
+      "rate": 10
+    },
+    {
+      "description": "※ お茶(飲料)",
+      "amount": 1234,
+      "rate": 8,
+      "reduced": true
+    },
+    {
+      "description": "※ 菓子",
+      "amount": 2345,
+      "rate": 8
+    }
+  ],
+  "totals": [
+    {
+      "rate": 10,
+      "amount": 5997,
+      "tax": 597
+    },
+    {
+      "rate": 8,
+      "amount": 3579,
+      "tax": 285
+    }
+  ]
+}
