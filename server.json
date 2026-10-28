@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ayatrader/jp-invoice-check",
+  "title": "JP Invoice Check",
+  "description": "Check Japanese qualified invoices: six required items, per-rate totals, tax rounded once per rate.",
+  "repository": {
+    "url": "https://github.com/ayatrader/jp-invoice-check",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "jp-invoice-check",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
