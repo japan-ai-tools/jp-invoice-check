@@ -1,0 +1,9 @@
+# JP Invoice Check
+
+> Checks a Japanese qualified invoice (適格請求書): the six required items of the National Tax Agency, reduced-rate (8%) marks, totals per rate, and consumption tax rounded once per invoice per rate (flags the common per-line rounding mistake). Registration number format T + 13 digits and corporate-number check digit. Agent Skill (SKILL.md), CLI and MCP server. Python stdlib, no network, MIT.
+
+- SKILL.md: Agent Skill instructions (draft or review an invoice, then run the checker)
+- jpinvoice/check.py: check_invoice(dict) -> {ok, errors, warnings, required_items, by_rate}; expected_tax(amount, rate, basis, rounding); check_registration_number(s)
+- jpinvoice/server.py: MCP stdio server with tools jp_invoice_check, jp_invoice_registration_number, jp_invoice_tax
+- examples/ok.json, examples/line_rounding_mistake.json
+- tests/test_jpinvoice.py: 18 tests
