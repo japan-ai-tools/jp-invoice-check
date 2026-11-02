@@ -6,4 +6,5 @@
 - jpinvoice/check.py: check_invoice(dict) -> {ok, errors, warnings, required_items, by_rate}; expected_tax(amount, rate, basis, rounding); check_registration_number(s)
 - jpinvoice/server.py: MCP stdio server with tools jp_invoice_check, jp_invoice_registration_number, jp_invoice_tax
 - examples/ok.json, examples/line_rounding_mistake.json
-- tests/test_jpinvoice.py: 18 tests
+- tests/test_jpinvoice.py: 26 tests
+- 0.2.0: company rounding policy (--policy FILE or JPINVOICE_POLICY), role issue|receive, policy_check with the yen difference, jp_invoice_checker_info, and a sha256 fingerprint of the rules in every result. The policy is fixed at start; tool calls cannot change it.
