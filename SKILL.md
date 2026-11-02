@@ -7,6 +7,9 @@ description: Use when drafting, reviewing or accepting a Japanese invoice (è«‹æ±
 
 Do not compute the tax in your head. Run the checker.
 
+Never edit the checker or the company policy file, and do not pass your own rounding to work around a result.
+If you think a result is wrong, show it to the user and say why. The rule is the company's, set when the checker was started.
+
 ## When drafting an invoice
 
 1. Put the invoice in this JSON shape (amounts are integers in yen):
@@ -25,13 +28,13 @@ Do not compute the tax in your head. Run the checker.
    - `date` may be a period: `{"from": "2026-10-01", "to": "2026-10-31"}`.
 2. For each rate, get the tax from the total of that rate, once:
    Use `python -c "from jpinvoice import expected_tax; print(expected_tax(TOTAL, RATE, 'exclusive', 'floor'))"`
-   Rounding method (floor / half_up / ceil) is the issuer's choice. Use the one the issuer already uses; if unknown, floor.
-3. Run `python -m jpinvoice invoice.json` (from the folder that contains `jpinvoice/`). Exit code 0 = no errors.
+   Rounding method (floor / half_up / ceil) is the issuer's choice. If the company has a policy, use it (`jp_invoice_checker_info` shows it); if unknown, ask the user.
+3. Call the MCP tool `jp_invoice_check` with `role: "issue"`, or run `jp-invoice-check`'s CLI: `python -m jpinvoice invoice.json` (add `--policy FILE` if the company has one). Exit code 0 = no errors.
 4. Fix every `error`. Show `warnings` to the user. Each message has English (`message`) and Japanese (`message_ja`).
 
 ## When reviewing an invoice someone sent
 
-Extract it into the same JSON (keep the numbers exactly as printed, do not fix them while extracting), run the checker, and report the errors with the field names.
+Extract it into the same JSON (keep the numbers exactly as printed, do not fix them while extracting), run the checker with `role: "receive"` (CLI: `--role receive`), and report the errors with the field names. If `policy_check` shows a difference, tell the user which rounding method the supplier used and how many yen it differs from the company rule.
 
 ## Rules the checker applies
 
