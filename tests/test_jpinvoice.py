@@ -136,7 +136,7 @@ class TestServerAndCli(unittest.TestCase):
 
     def test_tools(self):
         r = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        self.assertEqual(len(r["result"]["tools"]), 3)
+        self.assertEqual(len(r["result"]["tools"]), 4)
         self.assertTrue(self.call("jp_invoice_check", {"invoice": OK})["structuredContent"]["ok"])
         self.assertEqual(self.call("jp_invoice_tax", {"amount": 3579, "rate": 8})["structuredContent"]["tax"], 286)
         self.assertTrue(self.call("jp_invoice_tax", {"amount": 1, "rate": 5})["isError"])
@@ -151,3 +151,93 @@ class TestServerAndCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCompanyPolicy(unittest.TestCase):
+    """社内規則(Qiitaのコメント 2026-11-01 を受けて): 規則は起動時だけ。AIの呼び出しでは変えられない"""
+
+    def setUp(self):
+        from jpinvoice import policy
+        self.policy = policy
+        self.floor = policy.validate({"name": "テスト社", "rounding": "floor"})
+        self.inv = copy.deepcopy(OK)
+        # 10%: 5997 -> 切捨て 599 / 四捨五入 600。四捨五入で書かれた請求書にする
+        for t in self.inv["totals"]:
+            if t["rate"] == 10:
+                t["tax"] = expected_tax(t["amount"], 10, rounding="half_up")
+
+    def test_issue_mismatch_is_error(self):
+        r = check_invoice(self.inv, policy=self.floor, role="issue")
+        self.assertFalse(r["ok"])
+        self.assertIn("E_POLICY_ROUNDING", codes(r))
+        row = [x for x in r["policy_check"]["by_rate"] if x["rate"] == 10][0]
+        self.assertEqual(row["invoice_rounding"], "half_up")
+        self.assertEqual(row["difference"], row["stated_tax"] - row["tax_by_policy"])
+        self.assertNotEqual(row["difference"], 0)
+
+    def test_receive_mismatch_is_warning_with_reason(self):
+        r = check_invoice(self.inv, policy=self.floor, role="receive")
+        self.assertTrue(r["ok"])
+        w = [m for m in r["warnings"] if m["code"] == "W_POLICY_ROUNDING"][0]
+        self.assertIn("四捨五入", w["message_ja"])
+        self.assertIn("切捨て", w["message_ja"])
+
+    def test_same_rule_passes(self):
+        r = check_invoice(OK, policy=self.floor)
+        self.assertTrue(r["ok"], codes(r))
+        self.assertTrue(r["policy_check"]["same"])
+
+    def test_invoice_cannot_override_policy(self):
+        inv = dict(self.inv, rounding="half_up")         # 請求書の中で「四捨五入でいい」と書いても
+        r = check_invoice(inv, policy=self.floor)
+        self.assertIn("W_INVOICE_ROUNDING_IGNORED", codes(r))
+        self.assertIn("E_POLICY_ROUNDING", codes(r))
+
+    def test_bad_policy_rejected(self):
+        with self.assertRaises(ValueError):
+            self.policy.validate({"rounding": "round"})
+
+    def test_server_policy_fixed_at_start(self):
+        import tempfile
+        from jpinvoice import server
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "policy.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"rounding": "floor"}, f)
+            old = server.POLICY
+            try:
+                server.POLICY = self.policy.load(path)
+                call = lambda name, args: handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                                  "params": {"name": name, "arguments": args}})["result"]
+                # 道具の引数で端数処理を変えようとしても、社内規則が勝つ
+                t = call("jp_invoice_tax", {"amount": 5997, "rate": 10, "rounding": "half_up"})
+                self.assertEqual(t["structuredContent"]["tax"], 599)
+                r = call("jp_invoice_check", {"invoice": self.inv})["structuredContent"]
+                self.assertIn("E_POLICY_ROUNDING", codes(r))
+                self.assertEqual(r["checker"]["policy"]["rounding"], "floor")
+                info = call("jp_invoice_checker_info", {})["structuredContent"]
+                self.assertEqual(len(info["code_sha256"]), 64)
+            finally:
+                server.POLICY = old
+
+    def test_fingerprint_changes_with_policy(self):
+        a = self.policy.fingerprint(None)
+        b = self.policy.fingerprint(self.floor)
+        c = self.policy.fingerprint(self.policy.validate({"rounding": "ceil"}))
+        self.assertEqual(a["code_sha256"], b["code_sha256"])
+        self.assertNotEqual(b["policy_sha256"], c["policy_sha256"])
+
+    def test_cli_policy_and_fingerprint(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            pol = os.path.join(d, "p.json")
+            inv = os.path.join(d, "i.json")
+            json.dump({"rounding": "floor"}, open(pol, "w", encoding="utf-8"))
+            json.dump(self.inv, open(inv, "w", encoding="utf-8"), ensure_ascii=False)
+            r = subprocess.run([sys.executable, "-m", "jpinvoice", inv, "--policy", pol, "--role", "receive"],
+                               cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("W_POLICY_ROUNDING", r.stdout)
+            f = subprocess.run([sys.executable, "-m", "jpinvoice", "--fingerprint"], cwd=ROOT,
+                               capture_output=True, text=True, encoding="utf-8")
+            self.assertIn("code_sha256", f.stdout)
