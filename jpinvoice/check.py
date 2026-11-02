@@ -129,8 +129,14 @@ def _int(v):
     return v
 
 
-def check_invoice(inv, rounding=None):
-    """Check one invoice. Returns {ok, errors, warnings, required_items, by_rate}.
+def check_invoice(inv, rounding=None, policy=None, role="issue"):
+    """Check one invoice. Returns {ok, errors, warnings, required_items, by_rate, policy_check}.
+
+    policy: your company's rule {"rounding": ..., "price_basis": ...} (see policy.py). When it is set, it wins over
+            the invoice's own "rounding" field, and the invoice is compared with it.
+    role:   "issue"   = an invoice you send. Not following your rule is an error.
+            "receive" = an invoice a supplier sent you. Their method may differ legally; the difference is a warning
+                        that says which method they used and how many yen it moves.
 
     inv = {
       "issuer": {"name": str, "registration_number": "T1234567890123"},
@@ -159,7 +165,16 @@ def check_invoice(inv, rounding=None):
     basis = inv.get("price_basis", "exclusive")
     if basis not in ("exclusive", "inclusive"):
         raise ValueError("price_basis must be 'exclusive' or 'inclusive'")
-    rounding = rounding or inv.get("rounding")
+    if role not in ("issue", "receive"):
+        raise ValueError("role must be 'issue' or 'receive'")
+    if policy:
+        if inv.get("rounding") and inv.get("rounding") != policy["rounding"]:
+            msgs.append(_msg("warning", "W_INVOICE_ROUNDING_IGNORED", "rounding",
+                             f"The invoice says rounding={inv.get('rounding')!r}; the company policy ({policy['rounding']}) is used instead.",
+                             f"請求書側の端数処理の指定({inv.get('rounding')})は使わず、社内規則({policy['rounding']})で検査しました。"))
+        rounding = None                       # check against all methods first, then compare with the policy below
+    else:
+        rounding = rounding or inv.get("rounding")
     if rounding is not None and rounding not in ROUNDINGS:
         raise ValueError(f"rounding must be one of {ROUNDINGS}")
 
@@ -263,10 +278,41 @@ def check_invoice(inv, rounding=None):
     if not req["6_buyer_name"]:
         msgs.append(_msg("error", "E_BUYER_MISSING", "buyer.name", "Buyer name is missing (required item 6).",
                          "交付を受ける事業者(買い手)の氏名・名称がありません(記載事項6)。"))
+    policy_check = _compare_policy(policy, role, basis, by_rate, msgs) if policy else None
     errors = [m for m in msgs if m["level"] == "error"]
     warnings = [m for m in msgs if m["level"] == "warning"]
-    return {"ok": not errors, "errors": errors, "warnings": warnings, "required_items": req,
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "required_items": req, "policy_check": policy_check,
             "registration_number": {k: rn[k] for k in ("normalized", "valid_format", "corporate_check_digit_ok")},
             "by_rate": by_rate, "price_basis": basis,
             "not_checked": ["whether the registration number is currently registered (needs the NTA site)",
                             "simplified invoices (適格簡易請求書) and other special cases"]}
+
+
+_RJA = {"floor": "切捨て", "half_up": "四捨五入", "ceil": "切上げ"}
+_BJA = {"exclusive": "税抜", "inclusive": "税込"}
+
+
+def _compare_policy(policy, role, basis, by_rate, msgs):
+    """Compare what the invoice did with the company rule, rate by rate."""
+    level = "error" if role == "issue" else "warning"
+    pr, pb = policy["rounding"], policy["price_basis"]
+    rows = []
+    if basis != pb:
+        msgs.append(_msg(level, "E_POLICY_PRICE_BASIS" if level == "error" else "W_POLICY_PRICE_BASIS", "price_basis",
+                         f"Amounts are {basis}; the company policy is {pb}.",
+                         f"金額は{_BJA[basis]}で書かれていますが、社内規則は{_BJA[pb]}です。"))
+    for row in by_rate:
+        used = row["matched_rounding"]
+        ours = row["expected_tax"][pr]
+        diff = None if row["stated_tax"] is None else row["stated_tax"] - ours
+        rows.append({"rate": row["rate"], "invoice_rounding": used, "policy_rounding": pr,
+                     "stated_tax": row["stated_tax"], "tax_by_policy": ours, "difference": diff,
+                     "same": used is not None and row["stated_tax"] == ours})
+        if used is not None and row["stated_tax"] != ours:
+            msgs.append(_msg(level, "E_POLICY_ROUNDING" if level == "error" else "W_POLICY_ROUNDING", f"totals[{row['rate']}].tax",
+                             f"{row['rate']}% tax {row['stated_tax']} uses {used}; the company policy is {pr} "
+                             f"({ours}), a difference of {diff:+d} yen.",
+                             f"{row['rate']}%の税額 {row['stated_tax']} は{_RJA[used]}で計算されています。社内規則は{_RJA[pr]}"
+                             f"({ours}円)なので、{diff:+d}円ずれます。"))
+    return {"policy": policy, "role": role, "by_rate": rows,
+            "same": basis == pb and all(r["same"] for r in rows)}
