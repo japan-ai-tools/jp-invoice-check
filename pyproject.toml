@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jp-invoice-check"
-version = "0.1.0"
+version = "0.2.0"
 description = "Check Japanese qualified invoices: six required items, per-rate totals, tax rounded once per rate."
 readme = "README.md"
 license = { text = "MIT" }
