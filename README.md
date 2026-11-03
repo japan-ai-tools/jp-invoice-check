@@ -1,6 +1,6 @@
 # JP Invoice Check
 
-<!-- mcp-name: io.github.ayatrader/jp-invoice-check -->
+<!-- mcp-name: io.github.japan-ai-tools/jp-invoice-check -->
 
 **An Agent Skill, CLI and MCP server that checks a Japanese qualified invoice (適格請求書): the six required items, reduced-rate marks, totals per rate, and the rule that consumption tax is rounded once per invoice per rate.**
 
@@ -36,7 +36,7 @@ Then every check also compares the invoice with that rule (`policy_check`):
 
 A check is only worth something if the AI being checked cannot rewrite it. (Thanks to a reader's comment on Qiita for this point.)
 
-1. **Install it outside the agent's working folder** and run it as a separate process, for example `uvx jp-invoice-check` or `pip install jp-invoice-check` into an environment the agent does not write to. Do not copy the source into the project the agent edits.
+1. **Install it outside the agent's working folder** and run it as a separate process, for example `pip install "git+https://github.com/japan-ai-tools/jp-invoice-check"` into an environment the agent does not write to (PyPI may still have 0.1.0, which has no `--policy`; run `python -m jpinvoice --fingerprint` and make sure it says 0.2.0 or later). Do not copy the source into the project the agent edits.
 2. **Load the rule when you start it**, not from the AI: `jp-invoice-check --policy /etc/company/invoice_policy.json` or set `JPINVOICE_POLICY`. Make that file read-only and keep it outside the agent's folder. No tool argument can change it, and a `rounding` field inside the invoice is ignored while a rule is loaded (`W_INVOICE_ROUNDING_IGNORED`).
 3. **Deny edits** to the install path and the policy file in your agent's permissions (in Claude Code, a `deny` rule for `Edit` and `Write` on those paths).
 4. **Check the fingerprint.** Each result has `checker.code_sha256`. For 0.2.0 it is:
@@ -66,10 +66,36 @@ expected_tax(1000, 10, "inclusive")         # 90
 check_invoice(invoice)["errors"]            # [{level, code, field, message, message_ja}, ...]
 ```
 
+## Many invoices from a CSV (for accounting staff / 経理の人向け)
+
+Export the invoice lines from Excel or your accounting software as CSV (one row per line item, UTF-8 or Shift_JIS),
+then:
+
+```
+python -m jpinvoice.batch examples/invoices_sample.csv --html report.html [--policy company_policy.json] [--role receive]
+```
+
+You get one HTML page: which invoices are fine, which have errors (for example `E_TAX_LINE_ROUNDING`), and why,
+in Japanese. Headers can be Japanese (請求書番号・発行者・登録番号・取引日・買い手・税込税抜・品名・金額・税率・軽減・
+10%対象額・10%税額・8%対象額・8%税額) or English. See `examples/invoices_sample.csv`. Nothing leaves your PC.
+
+Excel や会計ソフトから請求書の明細を CSV(1行=1品目)で書き出し、上のコマンドで何十件でもまとめて検査できます。
+結果は1枚の HTML(誤りの理由つき・日本語)。外部への通信はありません。
+
+### Without Python: one HTML file / Python なしで使う
+
+Open `offline/jp_invoice_check.html` in a browser (double-click), choose the CSV, read the result. The same rules as the
+Python checker; a test runs both on the same CSVs (sample, Shift_JIS and 500 generated invoices with typical mistakes)
+and checks that they give the same verdicts and error codes (`tests/test_offline_html.py`, needs Node.js).
+The page has a Content-Security-Policy of `default-src 'none'`, so it cannot send your file anywhere.
+
+`offline/jp_invoice_check.html` をダブルクリックしてブラウザで開き、CSV を選ぶだけ。インストール不要。社内規則(端数処理・税抜/税込)と
+「自社が出す/取引先から受け取る」を選べます。結果は HTML で保存でき、CSV のひな形も保存できます。ページは通信できない設定です。
+
 ## MCP server (for AI agents)
 
 ```json
-{"mcpServers": {"jp-invoice-check": {"command": "uvx", "args": ["jp-invoice-check", "--policy", "/etc/company/invoice_policy.json"]}}}
+{"mcpServers": {"jp-invoice-check": {"command": "jp-invoice-check", "args": ["--policy", "/etc/company/invoice_policy.json"]}}}
 ```
 
 | Tool | Input | Returns |
@@ -80,6 +106,26 @@ check_invoice(invoice)["errors"]            # [{level, code, field, message, mes
 | `jp_invoice_tax` | `amount`, `rate`, `price_basis`, `rounding` | `tax` |
 
 All tools are read-only.
+
+### Over HTTP (remote MCP)
+
+For agents that only connect to remote MCP servers (streamable HTTP). Standard library only, JSON responses, no sessions:
+
+```
+python -m jpinvoice.http_server --port 8765 [--policy company_policy.json]   # http://127.0.0.1:8765/mcp
+```
+
+It binds to 127.0.0.1 unless you pass `--host`. Bodies over 1 MB are refused. `GET /` answers `ok` for health checks. If you expose it, put it behind your own authentication. (New in the GitHub source; the PyPI package gets it in the next release.)
+
+## How this differs from other free invoice checkers
+
+We looked at the other free Japanese invoice MCP servers listed on Glama (checked 2026-11-03). Their descriptions cover registration-number checks, required items and tax calculation with one default rounding method. None of the descriptions we read says that it names the per-line rounding mistake. This package is built around that one rule:
+
+- it recomputes tax per rate with floor, half-up and ceil, and tells you which method the invoice used, instead of assuming one
+- it returns `E_TAX_LINE_ROUNDING` when the difference comes from rounding each line, separately from other wrong tax
+- it compares a received invoice with your own written rounding rule (`E_POLICY_ROUNDING`) and says how many yen differ
+
+It does not look up whether a registration number is registered today (see Limits).
 
 ## Error codes
 
@@ -98,6 +144,8 @@ All tools are read-only.
 ## 日本語
 
 適格請求書(インボイス)を検査する Agent Skill・コマンド・MCPサーバーです。
+
+**ほかの無料の検査道具との違い**(Glama に載っている日本のインボイス用MCPの説明を 2026-11-03 に読んだ範囲): 登録番号・記載事項・税額の計算(端数処理は1つの方式が既定)を扱うものはありますが、「品目ごとに端数処理した誤り」を名前で返すと書いたものは見つかりませんでした。この道具は、切捨て・四捨五入・切上げのどれで計算されたかを当て、品目ごとの丸めの誤りを `E_TAX_LINE_ROUNDING` で、自社の端数処理の決まりとのずれを `E_POLICY_ROUNDING` で返します。登録番号が今も登録されているかの照会はしません。
 
 - 記載事項6つ(発行者名と登録番号・取引年月日・取引内容と軽減税率の印・税率ごとの合計と税率・税率ごとの消費税額・買い手の名称)を1つずつ判定
 - 消費税は「1つの請求書につき税率ごとに1回」端数処理。品目ごとに端数処理して足す誤り(AIがよくする)を `E_TAX_LINE_ROUNDING` で知らせます。切捨て・四捨五入・切上げのどれを使ったかも返します
