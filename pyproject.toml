@@ -23,8 +23,8 @@ dependencies = []
 jp-invoice-check = "jpinvoice.server:main"
 
 [project.urls]
-Homepage = "https://github.com/ayatrader/jp-invoice-check"
-Source = "https://github.com/ayatrader/jp-invoice-check"
+Homepage = "https://github.com/japan-ai-tools/jp-invoice-check"
+Source = "https://github.com/japan-ai-tools/jp-invoice-check"
 
 [tool.setuptools]
 packages = ["jpinvoice"]
