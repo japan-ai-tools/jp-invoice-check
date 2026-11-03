@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:">
+<title>適格請求書 まとめて検査(オフライン版)</title>
+<style>
+:root{--fg:#222;--bg:#fff;--muted:#666;--line:#ccc;--ng:#fdecea;--warn:#fff7e0;--ok:#eaf6ec;--head:#f3f3f3;--accent:#1a5fb4}
+@media (prefers-color-scheme:dark){:root{--fg:#e8e8e8;--bg:#1b1b1b;--muted:#aaa;--line:#444;--ng:#4a2420;--warn:#463a14;--ok:#1f3a25;--head:#2a2a2a;--accent:#8ab4f8}}
+body{font-family:system-ui,'Hiragino Sans','Meiryo',sans-serif;margin:0 auto;padding:16px;max-width:1100px;color:var(--fg);background:var(--bg);line-height:1.6}
+h1{font-size:1.4rem;margin:.2em 0}
+fieldset{border:1px solid var(--line);border-radius:6px;margin:12px 0;padding:8px 12px}
+label{margin-right:16px;display:inline-block}
+select,button,input{font:inherit}
+button{padding:6px 14px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:4px;cursor:pointer}
+button.sub{background:transparent;color:var(--accent)}
+#drop{border:2px dashed var(--line);border-radius:8px;padding:20px;text-align:center;margin:12px 0}
+#drop.over{border-color:var(--accent)}
+table{border-collapse:collapse;width:100%;margin:12px 0}
+td,th{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{background:var(--head)}
+.ng{background:var(--ng)}.warn{background:var(--warn)}.ok{background:var(--ok)}
+code{font-size:90%}.small{color:var(--muted);font-size:90%}
+.wrap{overflow-x:auto}
+</style>
+</head>
+<body>
+<h1>適格請求書 まとめて検査(オフライン版)</h1>
+<p>Excel・会計ソフトから書き出した請求書の明細CSV(1行=1品目)を選ぶと、記載事項6つと「税率ごとに1回の端数処理」を検査して、誤りの理由を日本語で並べます。<b>ファイルは外に送りません</b>(このページは通信できない設定です)。Pythonなどのインストールは要りません。</p>
+
+<fieldset>
+<legend>社内規則(任意)</legend>
+<label>端数処理 <select id="rounding"><option value="">決めていない(3通りどれでも可)</option><option value="floor">切捨て</option><option value="half_up">四捨五入</option><option value="ceil">切上げ</option></select></label>
+<label>金額の書き方 <select id="basis"><option value="exclusive">税抜</option><option value="inclusive">税込</option></select></label>
+<label>請求書の向き <select id="role"><option value="issue">自社が出す(規則違反は誤り)</option><option value="receive">取引先から受け取る(違いは注意)</option></select></label>
+</fieldset>
+
+<div id="drop">ここにCSVを置く、または <input type="file" id="file" accept=".csv,text/csv"></div>
+<p><button class="sub" id="sample">見本で試す</button> <button class="sub" id="template">CSVのひな形を保存</button> <button id="save" disabled>結果をHTMLで保存</button></p>
+<div id="out" class="wrap"></div>
+
+<p class="small">確かめていないこと: 登録番号がいま登録されているか(国税庁の公表サイトで確認してください)・適格簡易請求書などの特例。根拠: 国税庁「適格請求書等保存方式の概要」(https://www.nta.go.jp/publication/pamph/shohi/shohizei_11.pdf)。このページの検査は Python 版 jp-invoice-check と同じ規則で、同じ結果になることをテストで確かめています。</p>
+
+<script id="jpinvoice-core">
+/*CORE-START*/
+(function (root) {
+  "use strict";
+  var VERSION = "0.2.0-offline";
+  var RATES = [10, 8];
+  var ROUNDINGS = ["floor", "half_up", "ceil"];
+  var RJA = {floor: "切捨て", half_up: "四捨五入", ceil: "切上げ"};
+  var BJA = {exclusive: "税抜", inclusive: "税込"};
+  var ERA = {"令和": 2018, "平成": 1988};
+
+  function nfkc(s) { return String(s == null ? "" : s).normalize("NFKC"); }
+  function msg(level, code, field, ja) { return {level: level, code: code, field: field, message_ja: ja}; }
+
+  // exact integer arithmetic (BigInt): floor(n / d) with d > 0
+  function fdiv(n, d) { var q = n / d; if (n % d !== 0n && n < 0n) q -= 1n; return q; }
+  function expectedTax(amount, rate, basis, rounding) {
+    var a = BigInt(amount), r = BigInt(rate);
+    var n = a * r, d = basis === "exclusive" ? 100n : 100n + r;
+    var v;
+    if (rounding === "floor") v = fdiv(n, d);
+    else if (rounding === "ceil") v = -fdiv(-n, d);
+    else if (rounding === "half_up") v = n >= 0n ? fdiv(2n * n + d, 2n * d) : -fdiv(-2n * n + d, 2n * d);
+    else throw new Error("unknown rounding: " + rounding);
+    return Number(v);
+  }
+
+  function corporateCheckDigit(base12) {
+    var ds = base12.split("").map(Number).reverse(), s = 0;
+    for (var i = 0; i < ds.length; i++) s += ds[i] * (i % 2 === 0 ? 1 : 2);
+    return 9 - s % 9;
+  }
+
+  function checkRegistrationNumber(value) {
+    var out = {normalized: null, valid_format: false, corporate_check_digit_ok: null, messages: []};
+    if (value == null || String(value).trim() === "") {
+      out.messages.push(msg("error", "E_REGNO_MISSING", "issuer.registration_number", "登録番号がありません(記載事項1)。"));
+      return out;
+    }
+    var n = nfkc(value).replace(/[\s\-‐−ー―]/g, "");
+    if (n.charAt(0) === "t") n = "T" + n.slice(1);
+    if (!/^T\d{13}$/.test(n)) {
+      out.messages.push(msg("error", "E_REGNO_FORMAT", "issuer.registration_number", "登録番号は「T+13桁の数字」です。入力: '" + value + "'"));
+      return out;
+    }
+    out.normalized = n; out.valid_format = true;
+    if (n !== String(value)) out.messages.push(msg("warning", "W_REGNO_NORMALIZED", "issuer.registration_number", "登録番号を " + n + " に整えました(全角・空白・ハイフン)。"));
+    var ok = Number(n.charAt(1)) === corporateCheckDigit(n.slice(2));
+    out.corporate_check_digit_ok = ok;
+    if (!ok) out.messages.push(msg("warning", "W_REGNO_CHECK_DIGIT", "issuer.registration_number", "先頭の1桁が法人番号の検査用数字と合いません。発行者が法人なら番号の誤りです。登録が今も有効かは確かめていません(通信しないため)。"));
+    return out;
+  }
+
+  function realDate(y, m, d) {
+    if (y < 1 || y > 9999 || m < 1 || m > 12 || d < 1) return null;
+    var dim = [31, (y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0)) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1];
+    if (d > dim) return null;
+    return y * 10000 + m * 100 + d;
+  }
+  function parseDate(s) {
+    var t = nfkc(s).trim(), m = /^(\d{4})[-\/年.](\d{1,2})[-\/月.](\d{1,2})日?$/.exec(t);
+    if (m) return realDate(+m[1], +m[2], +m[3]);
+    m = /^(令和|平成)(\d{1,2}|元)年(\d{1,2})月(\d{1,2})日$/.exec(t);
+    if (!m) return null;
+    return realDate(ERA[m[1]] + (m[2] === "元" ? 1 : +m[2]), +m[3], +m[4]);
+  }
+
+  function checkInvoice(inv, policy, role) {
+    role = role || "issue";
+    var msgs = [], req = {};
+    var issuer = inv.issuer || {};
+    var rn = checkRegistrationNumber(issuer.registration_number);
+    msgs = msgs.concat(rn.messages);
+    var hasName = String(issuer.name || "").trim() !== "";
+    if (!hasName) msgs.push(msg("error", "E_ISSUER_NAME_MISSING", "issuer.name", "発行者の氏名・名称がありません(記載事項1)。"));
+    req["1_issuer_and_registration_number"] = hasName && rn.valid_format;
+    // 2 date
+    var d = inv.date, dateOk = true;
+    if (d == null || d === "") {
+      msgs.push(msg("error", "E_DATE_MISSING", "date", "取引年月日がありません(記載事項2)。"));
+      dateOk = false;
+    } else if (parseDate(d) == null) {
+      msgs.push(msg("error", "E_DATE_INVALID", "date", "日付が暦にない、または読めません: '" + d + "'"));
+      dateOk = false;
+    }
+    req["2_transaction_date"] = dateOk;
+
+    var basis = inv.price_basis || "exclusive";
+    if (policy && inv.rounding && inv.rounding !== policy.rounding) {
+      msgs.push(msg("warning", "W_INVOICE_ROUNDING_IGNORED", "rounding", "請求書側の端数処理の指定(" + inv.rounding + ")は使わず、社内規則(" + policy.rounding + ")で検査しました。"));
+    }
+    var rounding = policy ? null : (inv.rounding || null);
+    var allowed = rounding ? [rounding] : ROUNDINGS.slice();
+
+    var items = inv.items || [], itemOk = items.length > 0, sums = {}, lineTax = {};
+    if (!items.length) msgs.push(msg("error", "E_ITEMS_MISSING", "items", "取引の内容がありません(記載事項3)。"));
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i], f = "items[" + i + "]";
+      if (String(it.description || "").trim() === "") { msgs.push(msg("error", "E_ITEM_DESCRIPTION_MISSING", f + ".description", "取引の内容(品名など)が空です。")); itemOk = false; }
+      if (!Number.isInteger(it.amount) || !Number.isInteger(it.rate)) throw new Error(f + ": amount and rate must be integers");
+      var rate = it.rate;
+      if (RATES.indexOf(rate) < 0) { msgs.push(msg("error", "E_RATE_INVALID", f + ".rate", "税率は10か8です。入力: " + rate)); itemOk = false; continue; }
+      var reduced = !!it.reduced;
+      if (rate === 8 && !reduced) { msgs.push(msg("error", "E_REDUCED_NOT_MARKED", f + ".reduced", "8%の品目に軽減税率の対象である印(※など)がありません(記載事項3)。")); itemOk = false; }
+      if (rate === 10 && reduced) { msgs.push(msg("error", "E_REDUCED_RATE_MISMATCH", f + ".reduced", "軽減税率の印があるのに税率が10%です。")); itemOk = false; }
+      sums[rate] = (sums[rate] || 0) + it.amount;
+      if (!lineTax[rate]) lineTax[rate] = {floor: 0, half_up: 0, ceil: 0};
+      ROUNDINGS.forEach(function (r) { lineTax[rate][r] += expectedTax(it.amount, rate, basis, r); });
+    }
+    req["3_description_and_reduced_mark"] = itemOk;
+
+    var totals = {};
+    (inv.totals || []).forEach(function (t) { totals[t.rate] = t; });
+    var rates = Object.keys(sums).map(Number).sort(function (a, b) { return b - a; });
+    var tOk = rates.length > 0, xOk = rates.length > 0, byRate = [];
+    rates.forEach(function (rate) {
+      var exp = {};
+      ROUNDINGS.forEach(function (r) { exp[r] = expectedTax(sums[rate], rate, basis, r); });
+      var row = {rate: rate, items_total: sums[rate], expected_tax: exp, line_rounding_tax: lineTax[rate], stated_amount: null, stated_tax: null, matched_rounding: null};
+      byRate.push(row);
+      var t = totals[rate];
+      if (!t) { msgs.push(msg("error", "E_TOTAL_BY_RATE_MISSING", "totals", rate + "%の合計と税額の行がありません(記載事項4・5)。")); tOk = xOk = false; return; }
+      if (t.amount == null) { msgs.push(msg("error", "E_TOTAL_BY_RATE_MISSING", "totals[" + rate + "].amount", rate + "%の合計額がありません(記載事項4)。")); tOk = false; }
+      else {
+        row.stated_amount = t.amount;
+        if (t.amount !== sums[rate]) { msgs.push(msg("error", "E_TOTAL_MISMATCH", "totals[" + rate + "].amount", rate + "%の合計額 " + t.amount + " が品目の合計 " + sums[rate] + " と合いません。")); tOk = false; }
+      }
+      if (t.tax == null) { msgs.push(msg("error", "E_TAX_MISSING", "totals[" + rate + "].tax", rate + "%の消費税額がありません(記載事項5)。")); xOk = false; return; }
+      var st = row.stated_tax = t.tax;
+      var hit = allowed.filter(function (r) { return exp[r] === st; });
+      if (hit.length) { row.matched_rounding = hit[0]; return; }
+      xOk = false;
+      var want = allowed.map(function (r) { return exp[r] + "円(" + RJA[r] + ")"; }).join("・");
+      if (allowed.some(function (r) { return lineTax[rate][r] === st; })) {
+        msgs.push(msg("error", "E_TAX_LINE_ROUNDING", "totals[" + rate + "].tax", rate + "%の税額 " + st + " は品目ごとに端数処理した合計です。端数処理は1つの請求書につき税率ごとに1回: 正しくは " + want + "。"));
+      } else {
+        msgs.push(msg("error", "E_TAX_MISMATCH", "totals[" + rate + "].tax", rate + "%の税額 " + st + " が合いません。正しくは " + want + "。"));
+      }
+    });
+    Object.keys(totals).forEach(function (k) {
+      if (!(k in sums)) msgs.push(msg("warning", "W_TOTAL_WITHOUT_ITEMS", "totals", k + "%の合計行がありますが、その税率の品目がありません。"));
+    });
+    req["4_total_per_rate_with_rate"] = tOk;
+    req["5_tax_per_rate"] = xOk;
+    req["6_buyer_name"] = String((inv.buyer || {}).name || "").trim() !== "";
+    if (!req["6_buyer_name"]) msgs.push(msg("error", "E_BUYER_MISSING", "buyer.name", "交付を受ける事業者(買い手)の氏名・名称がありません(記載事項6)。"));
+
+    var policyCheck = null;
+    if (policy) {
+      var level = role === "issue" ? "error" : "warning", pr = policy.rounding, pb = policy.price_basis || "exclusive";
+      if (basis !== pb) msgs.push(msg(level, level === "error" ? "E_POLICY_PRICE_BASIS" : "W_POLICY_PRICE_BASIS", "price_basis", "金額は" + BJA[basis] + "で書かれていますが、社内規則は" + BJA[pb] + "です。"));
+      var rows = byRate.map(function (row) {
+        var used = row.matched_rounding, ours = row.expected_tax[pr];
+        var diff = row.stated_tax == null ? null : row.stated_tax - ours;
+        if (used != null && row.stated_tax !== ours) {
+          msgs.push(msg(level, level === "error" ? "E_POLICY_ROUNDING" : "W_POLICY_ROUNDING", "totals[" + row.rate + "].tax",
+            row.rate + "%の税額 " + row.stated_tax + " は" + RJA[used] + "で計算されています。社内規則は" + RJA[pr] + "(" + ours + "円)なので、" + (diff > 0 ? "+" : "") + diff + "円ずれます。"));
+        }
+        return {rate: row.rate, invoice_rounding: used, policy_rounding: pr, stated_tax: row.stated_tax, tax_by_policy: ours, difference: diff, same: used != null && row.stated_tax === ours};
+      });
+      policyCheck = {policy: policy, role: role, by_rate: rows, same: basis === pb && rows.every(function (r) { return r.same; })};
+    }
+    var errors = msgs.filter(function (m) { return m.level === "error"; });
+    var warnings = msgs.filter(function (m) { return m.level === "warning"; });
+    return {ok: errors.length === 0, errors: errors, warnings: warnings, required_items: req, policy_check: policyCheck, by_rate: byRate, price_basis: basis};
+  }
+
+  // ---- CSV (one row per line item), same columns as `python -m jpinvoice.batch` ----
+  var ALIASES = {
+    invoice_id: ["請求書番号", "請求書no", "請求書id", "伝票番号", "invoice_id", "invoice"],
+    issuer_name: ["発行者", "発行者名", "取引先", "請求元", "issuer_name", "issuer"],
+    registration_number: ["登録番号", "インボイス番号", "適格請求書発行事業者登録番号", "registration_number"],
+    date: ["取引日", "取引年月日", "日付", "date"],
+    buyer_name: ["買い手", "宛名", "請求先", "buyer_name", "buyer"],
+    price_basis: ["税込税抜", "税抜税込", "price_basis", "basis"],
+    description: ["品名", "内容", "摘要", "description", "item"],
+    amount: ["金額", "amount"],
+    rate: ["税率", "rate"],
+    reduced: ["軽減", "軽減税率", "reduced"],
+    total_10: ["10%対象額", "10%対象", "total_10"],
+    tax_10: ["10%税額", "10%消費税", "tax_10"],
+    total_8: ["8%対象額", "8%対象", "total_8"],
+    tax_8: ["8%税額", "8%消費税", "tax_8"]
+  };
+  var HEAD = {};
+  Object.keys(ALIASES).forEach(function (k) { ALIASES[k].forEach(function (n) { HEAD[nfkc(n).toLowerCase().replace(/ /g, "")] = k; }); });
+  var INVOICE_FIELDS = ["issuer_name", "registration_number", "date", "buyer_name", "price_basis", "total_10", "tax_10", "total_8", "tax_8"];
+  var TRUE = ["※", "*", "1", "true", "yes", "y", "○", "〇", "はい", "軽減", "対象"];
+
+  function decode(bytes) {
+    if (typeof bytes === "string") return bytes;
+    try { var s = new TextDecoder("utf-8", {fatal: true}).decode(bytes); return s.charAt(0) === "﻿" ? s.slice(1) : s; }
+    catch (e) { return new TextDecoder("shift_jis").decode(bytes); }
+  }
+  function parseRows(text) {
+    var rows = [], row = [], cell = "", q = false, i = 0, c;
+    for (; i < text.length; i++) {
+      c = text.charAt(i);
+      if (q) {
+        if (c === '"') { if (text.charAt(i + 1) === '"') { cell += '"'; i++; } else q = false; }
+        else cell += c;
+      } else if (c === '"') q = true;
+      else if (c === ",") { row.push(cell); cell = ""; }
+      else if (c === "\n" || c === "\r") {
+        if (c === "\r" && text.charAt(i + 1) === "\n") i++;
+        row.push(cell); rows.push(row); row = []; cell = "";
+      } else cell += c;
+    }
+    if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+  function cellOf(v) { return nfkc(v).trim(); }
+  function toInt(v, what, row) {
+    var s = cellOf(v).replace(/[,¥円\s]/g, "");
+    if (s.slice(-1) === "%") s = s.slice(0, -1);
+    if (s === "") return null;
+    if (!/^-?\d+$/.test(s)) throw new Error("row " + row + ": " + what + " is not a whole number: '" + v + "'");
+    return parseInt(s, 10);
+  }
+  function toBasis(v) {
+    var s = cellOf(v).toLowerCase();
+    if (["", "税抜", "税抜き", "外税", "exclusive"].indexOf(s) >= 0) return "exclusive";
+    if (["税込", "税込み", "内税", "inclusive"].indexOf(s) >= 0) return "inclusive";
+    throw new Error("price basis must be 税抜 or 税込: '" + v + "'");
+  }
+  function toDate(v) {
+    var s = cellOf(v), m = /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/.exec(s);
+    if (m && realDate(+m[1], +m[2], +m[3]) != null) return m[1] + "-" + ("0" + m[2]).slice(-2) + "-" + ("0" + m[3]).slice(-2);
+    return s;
+  }
+
+  function parseCsv(input) {
+    var rows = parseRows(decode(input));
+    if (!rows.length) throw new Error("the CSV is empty");
+    var cols = {};
+    rows[0].forEach(function (h, i) { var k = HEAD[cellOf(h).toLowerCase().replace(/ /g, "")]; if (k && !(k in cols)) cols[k] = i; });
+    if (!("invoice_id" in cols)) throw new Error("the CSV needs a 請求書番号 (invoice_id) column");
+    var groups = {}, order = [], problems = [];
+    for (var n = 1; n < rows.length; n++) {
+      var r = rows[n], line = n + 1;
+      if (!r.some(function (c) { return c.trim() !== ""; })) continue;
+      var get = function (k) { return (k in cols && cols[k] < r.length) ? r[cols[k]] : ""; };
+      var iid = cellOf(get("invoice_id"));
+      if (!iid) { problems.push({row: line, message_ja: "請求書番号が空の行は飛ばしました。"}); continue; }
+      if (!(iid in groups)) { groups[iid] = {row: line, head: {}, items: [], errors: []}; order.push(iid); }
+      var g = groups[iid];
+      INVOICE_FIELDS.forEach(function (k) { var v = cellOf(get(k)); if (v && !(k in g.head)) g.head[k] = v; });
+      var amount, rate;
+      try { amount = toInt(get("amount"), "金額", line); rate = toInt(get("rate"), "税率", line); }
+      catch (e) { g.errors.push(e.message); continue; }
+      if (amount == null && rate == null && !cellOf(get("description"))) continue;
+      var item = {description: cellOf(get("description")), amount: amount, rate: rate};
+      if (TRUE.indexOf(cellOf(get("reduced")).toLowerCase()) >= 0) item.reduced = true;
+      g.items.push(item);
+    }
+    var out = order.map(function (iid) {
+      var g = groups[iid], h = g.head;
+      var inv = {issuer: {name: h.issuer_name || "", registration_number: h.registration_number || ""}, date: toDate(h.date || ""), buyer: {name: h.buyer_name || ""}, items: g.items, totals: []};
+      try {
+        inv.price_basis = toBasis(h.price_basis || "");
+        [10, 8].forEach(function (rate) {
+          var amt = toInt(h["total_" + rate], rate + "%対象額", g.row), tax = toInt(h["tax_" + rate], rate + "%税額", g.row);
+          if (amt != null || tax != null) inv.totals.push({rate: rate, amount: amt, tax: tax});
+        });
+      } catch (e) { g.errors.push(e.message); }
+      return {invoice_id: iid, row: g.row, invoice: inv, errors: g.errors};
+    });
+    return {invoices: out, problems: problems};
+  }
+
+  function checkCsv(input, policy, role) {
+    var parsed = parseCsv(input), results = [];
+    parsed.invoices.forEach(function (x) {
+      if (x.errors.length) { results.push({invoice_id: x.invoice_id, row: x.row, ok: false, input_errors: x.errors, errors: [], warnings: []}); return; }
+      var r;
+      try { r = checkInvoice(x.invoice, policy, role); }
+      catch (e) { results.push({invoice_id: x.invoice_id, row: x.row, ok: false, input_errors: [e.message], errors: [], warnings: []}); return; }
+      r.invoice_id = x.invoice_id; r.row = x.row; r.issuer = x.invoice.issuer.name; r.input_errors = [];
+      results.push(r);
+    });
+    var summary = {invoices: results.length, ok: results.filter(function (r) { return r.ok; }).length,
+      with_errors: results.filter(function (r) { return !r.ok; }).length,
+      with_warnings: results.filter(function (r) { return r.ok && r.warnings.length; }).length};
+    return {summary: summary, results: results, skipped_rows: parsed.problems, checker: {version: VERSION, policy: policy || null}};
+  }
+
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#x27;"}[c]; }); }
+  function reportTable(rep) {
+    var s = rep.summary;
+    var h = ["<p>請求書 " + s.invoices + " 件 / 問題なし " + s.ok + " 件 / <b>誤りあり " + s.with_errors + " 件</b> / 注意だけ " + s.with_warnings + " 件</p>",
+      "<table><tr><th>請求書番号</th><th>CSVの行</th><th>発行者</th><th>結果</th><th>内容</th></tr>"];
+    rep.results.forEach(function (r) {
+      var cls, verdict, body;
+      if (r.input_errors.length) { cls = "ng"; verdict = "読めない"; body = r.input_errors.map(esc).join("<br>"); }
+      else {
+        cls = !r.ok ? "ng" : (r.warnings.length ? "warn" : "ok");
+        verdict = {ng: "誤りあり", warn: "注意", ok: "問題なし"}[cls];
+        body = r.errors.concat(r.warnings).map(function (m) { return "<code>" + esc(m.code) + "</code> " + esc(m.message_ja); }).join("<br>");
+      }
+      h.push("<tr class='" + cls + "'><td>" + esc(r.invoice_id) + "</td><td>" + esc(r.row) + "</td><td>" + esc(r.issuer || "") + "</td><td>" + verdict + "</td><td>" + (body || "—") + "</td></tr>");
+    });
+    h.push("</table>");
+    if (rep.skipped_rows.length) h.push("<p class='small'>飛ばした行: " + rep.skipped_rows.map(function (p) { return esc(p.row); }).join(", ") + "</p>");
+    var p = rep.checker.policy;
+    h.push("<p class='small'>検査の設定: " + (p ? "社内規則 " + esc(RJA[p.rounding]) + "・" + esc(BJA[p.price_basis]) : "社内規則なし(切捨て・四捨五入・切上げのどれでも可)") + " / jp-invoice-check " + esc(rep.checker.version) + "</p>");
+    return h.join("\n");
+  }
+
+  var api = {VERSION: VERSION, expectedTax: expectedTax, corporateCheckDigit: corporateCheckDigit, checkRegistrationNumber: checkRegistrationNumber,
+    checkInvoice: checkInvoice, parseCsv: parseCsv, checkCsv: checkCsv, reportTable: reportTable, esc: esc};
+  if (typeof module !== "undefined" && module.exports) module.exports = api; else root.JPInvoice = api;
+})(this);
+/*CORE-END*/
+</script>
+<script>
+(function () {
+  "use strict";
+  var J = window.JPInvoice, last = null, out = document.getElementById("out"), save = document.getElementById("save");
+  var SAMPLE = "請求書番号,発行者,登録番号,取引日,買い手,税込税抜,品名,金額,税率,軽減,10%対象額,10%税額,8%対象額,8%税額\n" +
+    "A-001,株式会社サンプル商事,T1123456789012,2026/10/28,見本株式会社,税抜,コピー用紙,1999,10,,5997,597,3579,285\n" +
+    "A-001,,,,,,トナー,2999,10,,,,,\nA-001,,,,,,ボールペン,999,10,,,,,\nA-001,,,,,,お茶(飲料),1234,8,※,,,,\nA-001,,,,,,菓子,2345,8,※,,,,\n" +
+    "B-002,株式会社サンプル商事,T7123456789012,令和8年10月28日,見本株式会社,税抜,コピー用紙,\"1,999\",10%,,5997,599,3579,286\n" +
+    "B-002,,,,,,トナー,2999,10,,,,,\nB-002,,,,,,ボールペン,999,10,,,,,\nB-002,,,,,,お茶(飲料),1234,8,※,,,,\nB-002,,,,,,菓子,2345,8,※,,,,\n";
+  var TEMPLATE = "請求書番号,発行者,登録番号,取引日,買い手,税込税抜,品名,金額,税率,軽減,10%対象額,10%税額,8%対象額,8%税額\n";
+  function policy() { var r = document.getElementById("rounding").value; return r ? {name: "社内規則", rounding: r, price_basis: document.getElementById("basis").value} : null; }
+  function run(input) {
+    try { last = J.checkCsv(input, policy(), document.getElementById("role").value); out.innerHTML = J.reportTable(last); save.disabled = false; }
+    catch (e) { last = null; save.disabled = true; out.innerHTML = "<p class='ng'>読めませんでした: " + J.esc(e.message) + "</p>"; }
+  }
+  var lastInput = null;
+  function runFile(f) { var fr = new FileReader(); fr.onload = function () { lastInput = new Uint8Array(fr.result); run(lastInput); }; fr.readAsArrayBuffer(f); }
+  function download(name, text, type) {
+    var a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], {type: type})); a.download = name;
+    document.body.appendChild(a); a.click(); setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  }
+  document.getElementById("file").addEventListener("change", function (e) { if (e.target.files[0]) runFile(e.target.files[0]); });
+  ["rounding", "basis", "role"].forEach(function (id) { document.getElementById(id).addEventListener("change", function () { if (lastInput) run(lastInput); }); });
+  var drop = document.getElementById("drop");
+  drop.addEventListener("dragover", function (e) { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", function () { drop.classList.remove("over"); });
+  drop.addEventListener("drop", function (e) { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) runFile(e.dataTransfer.files[0]); });
+  document.getElementById("sample").addEventListener("click", function () { lastInput = SAMPLE; run(SAMPLE); });
+  document.getElementById("template").addEventListener("click", function () { download("請求書明細_ひな形.csv", "﻿" + TEMPLATE, "text/csv"); });
+  save.addEventListener("click", function () {
+    if (!last) return;
+    var html = "<!doctype html><html lang='ja'><head><meta charset='utf-8'><title>適格請求書のまとめて検査 結果</title><style>" +
+      "body{font-family:system-ui,'Hiragino Sans','Meiryo',sans-serif;margin:24px;color:#222;background:#fff}table{border-collapse:collapse;width:100%}" +
+      "td,th{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f3f3f3}.ng{background:#fdecea}.warn{background:#fff7e0}.ok{background:#eaf6ec}.small{color:#666;font-size:90%}" +
+      "</style></head><body><h1>適格請求書のまとめて検査 結果</h1>" + J.reportTable(last) + "</body></html>";
+    download("検査結果.html", html, "text/html");
+  });
+})();
+</script>
+</body>
+</html>
