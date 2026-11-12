@@ -49,6 +49,8 @@ A check is only worth something if the AI being checked cannot rewrite it. (Than
 
 `SKILL.md` tells the agent to put the invoice into JSON and call the checker instead of computing tax itself. Prefer the MCP server (installed as above) and let the skill only call it.
 
+To add the skill with the [skills](https://github.com/vercel-labs/skills) CLI: `npx skills add japan-ai-tools/jp-invoice-check` (it reads the `SKILL.md` at the repository root). / スキルだけ入れるなら `npx skills add japan-ai-tools/jp-invoice-check`。
+
 ## CLI
 
 ```bash
@@ -84,15 +86,21 @@ Excel や会計ソフトから請求書の明細を CSV(1行=1品目)で書き�
 
 ### Without Python: one HTML file / Python なしで使う
 
-Open `offline/jp_invoice_check.html` in a browser (double-click), choose the CSV, read the result. The same rules as the
+Open `offline/jp_invoice_check.html` in a browser (double-click), choose the CSV or the Excel file (.xlsx, first sheet;
+the old .xls format is not read), read the result. Since page version 0.3.0 the result can also be saved as a CSV
+(one row per finding, UTF-8 with BOM) and printed on A4. The .xlsx reader is part of the page (no library, no network)
+and is tested against the same data as CSV (`tests/test_offline_xlsx.py`). The same rules as the
 Python checker; a test runs both on the same CSVs (sample, Shift_JIS and 500 generated invoices with typical mistakes)
 and checks that they give the same verdicts and error codes (`tests/test_offline_html.py`, needs Node.js).
 The page has a Content-Security-Policy of `default-src 'none'`, so it cannot send your file anywhere.
 
-`offline/jp_invoice_check.html` をダブルクリックしてブラウザで開き、CSV を選ぶだけ。インストール不要。社内規則(端数処理・税抜/税込)と
-「自社が出す/取引先から受け取る」を選べます。結果は HTML で保存でき、CSV のひな形も保存できます。ページは通信できない設定です。
+`offline/jp_invoice_check.html` をダブルクリックしてブラウザで開き、CSV か Excel のファイル(.xlsx・1枚目のシート)を選びます。インストール不要。
+古い形式の .xls は読めません。社内規則(端数処理・税抜/税込)と「自社が出す/取引先から受け取る」を選べます。
+結果は HTML と CSV(1行=誤り1件)で保存でき、A4 で印刷できます。CSV のひな形も保存できます。ページは通信できない設定です。
 
 ## MCP server (for AI agents)
+
+Protocol: the stdio server speaks both MCP 2026-07-28 (stateless: `server/discover`, version and capabilities in each request's `_meta`, no `initialize`) and the older `initialize` flow (2025-06-18, 2025-03-26, 2024-11-05). Tests: `tests/test_mcp_2026.py`. 新しい MCP 2026-07-28(握手なし)と従来の initialize の両方で動きます。
 
 ```json
 {"mcpServers": {"jp-invoice-check": {"command": "jp-invoice-check", "args": ["--policy", "/etc/company/invoice_policy.json"]}}}
