@@ -165,3 +165,10 @@ It does not look up whether a registration number is registered today (see Limit
 - **0.2.0 から:** 規則は人が起動するときにだけ読み込みます(`--policy` か `JPINVOICE_POLICY`)。検査されるAIの側からは変えられません。結果には検査に使った規則の指紋(sha256)がつくので、検査の中身が書き換えられていないかを確かめられます。検査の道具は、AIが書き換えられない場所に入れて使ってください(上の「Keep the checker out of the AI's reach」)
 
 外部通信なし(登録が今も有効かは国税庁の公表サイトで確認してください)・Python標準ライブラリのみ・MIT。税務の助言ではありません。
+
+## Related tools from the same author
+
+- This checker does not ask whether a registration number is still registered. [invoice-watch](https://github.com/japan-ai-tools/invoice-watch) compares your supplier list with the NTA's published data and reports only the suppliers whose registration was cancelled, expired or renamed.
+- [genba-shorui](https://github.com/japan-ai-tools/genba-shorui) turns one site note into a daily report, an estimate and a qualified invoice in a single offline HTML page, with the same per-rate rounding check.
+
+関連(同じ作者): 登録が今も有効かは [取引先インボイス見張り(invoice-watch)](https://github.com/japan-ai-tools/invoice-watch) が取引先の一覧と国税庁の公表データを照らして、取消・失効・名称の変化だけを知らせます。現場のメモから日報・見積・請求書を作るなら [現場の書類(genba-shorui)](https://github.com/japan-ai-tools/genba-shorui)。
